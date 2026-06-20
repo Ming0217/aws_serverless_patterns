@@ -180,17 +180,36 @@ with **API Gateway** — all from the web console.
 
 **Objective:** Build a basic store/retrieve microservice from the console and learn core terms.
 
+> **Done programmatically with AWS SAM instead of the console** — see
+> [`module-01-intro/`](module-01-intro/) for the template, code, and detailed notes.
+
 **What I did**
-- _..._
+- Built the *Example User Service* as IaC: a DynamoDB `Users` table, an `add_user` Lambda
+  (invoked directly to seed data), and a `get_user` Lambda fronted by an API Gateway **REST API**
+  on `GET /users/{userid}`.
+- Deployed with `sam build` / `sam deploy --guided` (stack `m1-intro-serverless`, us-east-1).
+- Verified end to end: seeded a user via `aws lambda invoke`, then `curl`ed the API and got the
+  record back from DynamoDB.
 
 **Key learnings**
-- _..._
+- IaC vs. console: the same table + 2 functions + REST API is one declarative `template.yaml`.
+- Direct-invoke event (raw payload) vs. API Gateway proxy integration (HTTP request as event,
+  `{statusCode, headers, body}` response).
+- Least privilege via SAM policy templates (`DynamoDBRead/WritePolicy`).
+- REST API = Resources + Methods + Integration; implicit vs. explicit `AWS::Serverless::Api`.
+- Event-driven architecture: events flow **API Gateway ⇄ Lambda**, while client↔API Gateway is
+  HTTP and Lambda↔DynamoDB is an SDK call.
 
 **Code / artifacts**
-- _..._
+- [`module-01-intro/template.yaml`](module-01-intro/template.yaml) — implicit REST API
+- [`module-01-intro/template-explicit-api.yaml`](module-01-intro/template-explicit-api.yaml) — explicit API variant
+- [`module-01-intro/src/`](module-01-intro/src/) — `add_user` / `get_user` handlers
+- [`module-01-intro/README.md`](module-01-intro/README.md) — full run log + concept notes
 
 **Gotchas**
-- _..._
+- AWS CLI **v1 vs v2**: `uv`/pip `awscli` is v1; the v2-only `--cli-binary-format` flag failed
+  until switching to the Homebrew v2 (and removing a stray v1 from a mise Python on `PATH`).
+- Doubled `https://` in the `curl` URL → `Could not resolve host: https`.
 
 ---
 
