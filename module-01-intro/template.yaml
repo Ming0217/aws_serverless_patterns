@@ -1,0 +1,115 @@
+# ============================================================================
+# AWS SAM template — Module 1: Intro to Serverless ("Example User Service")
+# ============================================================================
+# A SAM template is a CloudFormation template with extra serverless shortcuts.
+# CloudFormation is AWS's infrastructure-as-code service: you declare the
+# resources you want, and it creates/updates/deletes them as one unit (a
+# "stack"). Declaring infra this way makes it repeatable and reviewable,
+# versus clicking through the console (which is how the workshop does M1).
+
+# The CloudFormation schema version. This is a fixed date-stamped value, not
+# "today's date" — it's the only valid value and rarely changes.
+AWSTemplateFormatVersion: "2010-09-09"
+
+# This line is what turns a plain CloudFormation template into a *SAM* template.
+# The SAM transform expands shorthand types like AWS::Serverless::Function into
+# the (much longer) underlying CloudFormation resources during deployment.
+Transform: AWS::Serverless-2016-10-31
+
+Description: >
+  M1 - Intro to Serverless - Example User Service.
+  Creates a DynamoDB Users table, an add_user function (invoked directly to seed
+  data), and a get_user function fronted by an API Gateway REST API.
+
+# Globals: default settings applied to every matching resource, so we don't
+# repeat them on each function. Anything here can still be overridden per-function.
+Globals:
+  Function:
+    Runtime: python3.12        # the managed Lambda runtime that executes our code
+    Timeout: 10                # seconds before Lambda kills the invocation
+    MemorySize: 128            # MB of RAM; CPU scales with memory on Lambda
+    Architectures:
+      - arm64                  # Graviton2 — cheaper/faster; matches Apple Silicon for local testing
+    Environment:
+      Variables:
+        # Pass the table's real (CloudFormation-generated) name into the code as
+        # an env var, so the handlers never hardcode it. !Ref on a table returns
+        # its name. This is the 12-factor "config in the environment" pattern.
+        TABLE_NAME: !Ref UsersTable
+
+# Resources: the actual AWS things this stack creates.
+Resources:
+  # --- DynamoDB table -------------------------------------------------------
+  # DynamoDB is a fully managed NoSQL key/value store. A table needs at least a
+  # partition key (a.k.a. HASH key) that uniquely identifies each item.
+  UsersTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: Users
+      BillingMode: PAY_PER_REQUEST   # on-demand: pay per request, no capacity to plan. Great for spiky/unknown load.
+      AttributeDefinitions:
+        # You only declare attributes that are part of a key. Every other field
+        # (name, email, ...) is schemaless and added at write time.
+        - AttributeName: userid
+          AttributeType: S            # S = String (N = Number, B = Binary)
+      KeySchema:
+        - AttributeName: userid
+          KeyType: HASH               # HASH = partition key (the primary identifier)
+
+  # --- add_user function ----------------------------------------------------
+  # Invoked DIRECTLY (not via the API) to seed data — mirrors the workshop's
+  # "add data with a Lambda function" step.
+  AddUserFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: m1-add-user
+      Handler: app.lambda_handler     # <file>.<function> — runs lambda_handler() in app.py
+      CodeUri: src/add_user/          # folder SAM packages and uploads as the function's code
+      Description: Writes a user item to the Users table (invoke directly).
+      Policies:
+        # SAM "policy templates" generate scoped, least-privilege IAM policies.
+        # This grants ONLY write access (PutItem/UpdateItem/DeleteItem) to ONLY
+        # this table — not blanket DynamoDB access.
+        - DynamoDBWritePolicy:
+            TableName: !Ref UsersTable
+
+  # --- get_user function ----------------------------------------------------
+  # Fronted by API Gateway. Reads one user by id.
+  GetUserFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: m1-get-user
+      Handler: app.lambda_handler
+      CodeUri: src/get_user/
+      Description: Reads a user item by userid; fronted by API Gateway.
+      Policies:
+        - DynamoDBReadPolicy:          # read-only (GetItem/Query/Scan) on just this table
+            TableName: !Ref UsersTable
+      Events:
+        # An "Api" event makes SAM implicitly create an API Gateway REST API and
+        # wire this route to the function using Lambda proxy integration (the
+        # whole HTTP request is passed to the handler as the `event` dict, and
+        # the handler's returned dict becomes the HTTP response).
+        GetUser:
+          Type: Api
+          Properties:
+            Path: /users/{userid}      # {userid} is a path parameter -> event["pathParameters"]["userid"]
+            Method: get
+
+# Outputs: values printed after deploy and queryable later. Handy for grabbing
+# the generated API URL and resource names without digging through the console.
+Outputs:
+  UsersTableName:
+    Description: Name of the DynamoDB table
+    Value: !Ref UsersTable
+  AddUserFunctionName:
+    Description: Name of the add_user Lambda (use with `aws lambda invoke`)
+    Value: !Ref AddUserFunction
+  ApiBaseUrl:
+    Description: Base URL of the REST API
+    # ServerlessRestApi is the logical ID SAM auto-generates for the implicit API.
+    # !Sub substitutes ${...} variables; ${AWS::Region} is a pseudo-parameter.
+    Value: !Sub "https://${ServerlessRestApi}.execute-api.${AWS::Region}.amazonaws.com/Prod"
+  GetUserExampleUrl:
+    Description: Example GET URL for a seeded user
+    Value: !Sub "https://${ServerlessRestApi}.execute-api.${AWS::Region}.amazonaws.com/Prod/users/user-001"

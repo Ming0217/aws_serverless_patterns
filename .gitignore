@@ -1,0 +1,19 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# AWS SAM
+.aws-sam/
+
+# AWS credentials / config (never commit secrets)
+.aws/
+*.pem
+.env
+.env.*

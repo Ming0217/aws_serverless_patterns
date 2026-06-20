@@ -1,0 +1,129 @@
+# ============================================================================
+# M1 — EXPLICIT API GATEWAY variant (for comparison with template.yaml)
+# ============================================================================
+# This builds the SAME Example User Service as template.yaml, but instead of
+# letting SAM create the REST API *implicitly* from the function's Api event,
+# we declare the API as its own resource (AWS::Serverless::Api) and point the
+# function's event at it with `RestApiId`.
+#
+# Why bother? An explicit API is what you reach for once you need to configure
+# the API itself: CORS, custom domains, access logging, stage variables,
+# request validation, and — coming in Module 2 — authorizers (Cognito / JWT).
+# With the implicit API there's no resource to attach those settings to.
+#
+# DEPLOYMENT NOTE: this template reuses the same fixed names (table "Users",
+# functions "m1-add-user"/"m1-get-user"), so it's a *drop-in replacement* for
+# template.yaml on the SAME stack — not a second stack. If you deploy it to
+# `m1-intro-serverless`, CloudFormation removes the old implicit API and creates
+# this explicit one, which means the API ID (and therefore the URL) CHANGES.
+# To deploy it as a separate stack instead, rename the table/functions first.
+
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  M1 - Intro to Serverless (explicit API Gateway variant). Same resources as
+  template.yaml, but the REST API is declared explicitly.
+
+Globals:
+  Function:
+    Runtime: python3.12
+    Timeout: 10
+    MemorySize: 128
+    Architectures:
+      - arm64
+    Environment:
+      Variables:
+        TABLE_NAME: !Ref UsersTable
+
+Resources:
+  # --- DynamoDB table (unchanged from template.yaml) ------------------------
+  UsersTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: Users
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: userid
+          AttributeType: S
+      KeySchema:
+        - AttributeName: userid
+          KeyType: HASH
+
+  # --- THE KEY DIFFERENCE: an explicit REST API resource --------------------
+  # In template.yaml this resource did not exist — SAM generated one named
+  # `ServerlessRestApi` behind the scenes. Here we own it, name it, and can
+  # configure it. The logical ID is now `UsersApi` (our choice).
+  UsersApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      Name: m1-users-api
+      # StageName is REQUIRED for an explicit API and becomes the URL path
+      # segment (…/Prod/…). The implicit API defaulted this to "Prod" for us.
+      StageName: Prod
+      # Regional endpoints are the common default for new APIs (vs. edge-optimized
+      # CloudFront-fronted endpoints). Setting it here is only possible because
+      # the API is now an explicit resource.
+      EndpointConfiguration:
+        Type: REGIONAL
+      # Examples of things you can ONLY configure on an explicit API
+      # (left commented — not needed for M1, but this is the payoff):
+      #
+      # Cors:
+      #   AllowMethods: "'GET,OPTIONS'"
+      #   AllowOrigin: "'*'"
+      #
+      # Auth:                      # <- Module 2 territory (Cognito / JWT authorizers)
+      #   DefaultAuthorizer: ...
+      #
+      # AccessLogSetting:
+      #   DestinationArn: ...
+      #   Format: ...
+
+  # --- add_user function (unchanged; not fronted by the API) ----------------
+  AddUserFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: m1-add-user
+      Handler: app.lambda_handler
+      CodeUri: src/add_user/
+      Description: Writes a user item to the Users table (invoke directly).
+      Policies:
+        - DynamoDBWritePolicy:
+            TableName: !Ref UsersTable
+
+  # --- get_user function (now wired to OUR api via RestApiId) ---------------
+  GetUserFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: m1-get-user
+      Handler: app.lambda_handler
+      CodeUri: src/get_user/
+      Description: Reads a user item by userid; fronted by the explicit API.
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref UsersTable
+      Events:
+        GetUser:
+          Type: Api
+          Properties:
+            # This single line is the other half of the change: bind the route
+            # to our explicit API instead of letting SAM invent an implicit one.
+            RestApiId: !Ref UsersApi
+            Path: /users/{userid}
+            Method: get
+
+Outputs:
+  UsersTableName:
+    Description: Name of the DynamoDB table
+    Value: !Ref UsersTable
+  AddUserFunctionName:
+    Description: Name of the add_user Lambda (use with `aws lambda invoke`)
+    Value: !Ref AddUserFunction
+  ApiBaseUrl:
+    Description: Base URL of the REST API
+    # Note we now reference our own logical ID `UsersApi`, NOT the auto-generated
+    # `ServerlessRestApi` used in template.yaml.
+    Value: !Sub "https://${UsersApi}.execute-api.${AWS::Region}.amazonaws.com/Prod"
+  GetUserExampleUrl:
+    Description: Example GET URL for a seeded user
+    Value: !Sub "https://${UsersApi}.execute-api.${AWS::Region}.amazonaws.com/Prod/users/user-001"
