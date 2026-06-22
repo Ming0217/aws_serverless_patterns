@@ -160,7 +160,7 @@ uv run python -c "import boto3, aws_lambda_powertools; print('python libs OK')"
 | # | Module | Pattern | Est. duration | Status |
 | --- | --- | --- | --- | --- |
 | 1 | Intro to Serverless | Console-built microservice | 20–30 min | ✅ Done (via SAM) |
-| 2 | Synchronous Invocation — *Users Service* | Sync request/response + IaC + auth | 2–3 hrs | ⬜ Not started |
+| 2 | Synchronous Invocation — *Users Service* | Sync request/response + IaC + auth | 2–3 hrs | ✅ Done (via SAM) |
 | 3 | Synchronous Invocation + Idempotence — *Orders Service* | Idempotent sync + observability | 1–2 hrs | ⬜ Not started |
 | 4 | Asynchronous Invocation — *User Profile Service* | Async (fire-and-forget) | 1–2 hrs | ⬜ Not started |
 | 5 | Polling — *Order Status Polling Service* | Polling + event bus | — | ⬜ Not started |
@@ -224,19 +224,40 @@ custom **authorizer function using JWTs**.
 
 **Objective:** Rebuild the sync pattern as IaC with automated deploys and added authentication.
 
+> **Done with AWS SAM** — see [`module-02-users-sync/`](module-02-users-sync/) for the template,
+> handlers, authorizer, tests, and detailed notes.
+
 **What I did**
-- _..._
+- Built a **mono-lambda** Users microservice (one Lambda, internal router) over DynamoDB with a
+  REST API: `POST/GET /users`, `GET/PUT/DELETE /users/{userid}`.
+- Added **Amazon Cognito** (user pool, app client, hosted-UI domain, admin group) for auth, and a
+  custom **Lambda authorizer** that verifies the JWT and enforces the `apiAdmins` group
+  (admin-only `DELETE`).
+- Wrote **unit tests** (pytest + moto) and gated **integration tests**; added **observability**
+  (X-Ray tracing, structured JSON logs, EMF custom metrics).
 
 **Key learnings**
-- _Why console GUIs slow teams down / where manual steps go wrong_
-- _SAM template structure, `sam build` / `sam deploy` flow_
-- _Cognito vs. custom JWT authorizer tradeoffs_
+- IaC at scale: one SAM template for table + function + REST API + Cognito + authorizer;
+  `sam deploy` updates incrementally (only `sam delete` tears down).
+- Mono-lambda vs. single-function tradeoffs (single-function comes in M3).
+- **Cognito = authentication; Lambda authorizer = authorization** (coarse native authorizer vs.
+  custom group-based logic); 401 (no token) vs. 403 (not allowed).
+- `UserPool` vs. `UserPoolClient`; the token carries `cognito:groups` for authz.
+- Testing standalone handlers with moto via `importlib`; EMF metrics need no IAM/SDK call.
 
 **Code / artifacts**
-- _..._
+- [`module-02-users-sync/template.yaml`](module-02-users-sync/template.yaml) — full stack
+- [`module-02-users-sync/src/api/users.py`](module-02-users-sync/src/api/users.py) — mono-lambda handler
+- [`module-02-users-sync/src/authorizer/authorizer.py`](module-02-users-sync/src/authorizer/authorizer.py) — Lambda authorizer
+- [`module-02-users-sync/tests/`](module-02-users-sync/tests/) — unit + integration tests
+- [`module-02-users-sync/README.md`](module-02-users-sync/README.md) — concept notes + run log
 
 **Gotchas**
-- _..._
+- Used the wrong stack name in CLI commands (placeholder vs. the real `module-02-users-sync` in
+  `samconfig.toml`) → empty query results.
+- A `200` without a token meant the authorizer wasn't deployed yet; pass the **raw** ID token (no
+  `Bearer`), and **re-authenticate after a group change** (claims are baked in at sign-in).
+- Default Cognito password policy requires a special character; run pytest from the right dir.
 
 ---
 

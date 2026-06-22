@@ -1,0 +1,6 @@
+{
+  "resource": "/users/{userid}",
+  "httpMethod": "GET",
+  "pathParameters": { "userid": "user-001" },
+  "body": null
+}

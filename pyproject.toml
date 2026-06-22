@@ -9,3 +9,16 @@ dependencies = [
     "aws-lambda-powertools>=3.29.0",
     "boto3>=1.43.34",
 ]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "moto>=5.0",          # mock AWS (DynamoDB) for unit tests
+    "requests>=2.31",     # integration tests against the deployed API
+    "python-jose>=3.3.0", # imported by the Lambda authorizer under test
+]
+
+[tool.pytest.ini_options]
+markers = [
+    "integration: hits a deployed API; requires API_BASE_URL + ID_TOKEN env vars",
+]

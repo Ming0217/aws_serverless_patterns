@@ -146,6 +146,86 @@ Note this applies to `get_user`. The `add_user` function has no API Gateway in f
 you invoke it directly, so *its* event is passed from the **invoker** (your `aws lambda invoke`)
 to Lambda.
 
+## Concept — Anatomy of a Lambda function (code + config)
+
+A Lambda "function" is **not just code** — it's your code *plus* configuration metadata telling
+Lambda how to run it. AWS's four steps to run code on Lambda map onto this module like so:
+
+| Step | Meaning | In this module |
+| --- | --- | --- |
+| 1. Write code | business logic | `src/add_user/app.py`, `src/get_user/app.py` |
+| 2. Upload code + deps | package & ship | `sam build` packages, `sam deploy` uploads to S3 (boto3 is in the runtime, no extra deps) |
+| 3. Create function (runtime + config) | register with settings | the `AWS::Serverless::Function` blocks in `template.yaml` |
+| 4. Invoke | run in the cloud | `aws lambda invoke` (add_user) / API Gateway (get_user) |
+
+**"Runtime environment"** = which managed sandbox runs the code — the **runtime** (`python3.12`:
+interpreter + Amazon Linux + AWS SDK, all patched by AWS) and **architecture** (`arm64`). On
+invoke, Lambda spins up an isolated micro-VM from that runtime (the *execution environment*).
+
+**"Configuration"** = the knobs: handler (entry point), memory (also sets CPU), timeout,
+environment variables, and the IAM execution role (permissions).
+
+These live in `template.yaml` — step 3 done declaratively:
+
+```yaml
+Globals:
+  Function:
+    Runtime: python3.12      # runtime environment (managed Python sandbox)
+    Timeout: 10              # config: max seconds per invocation
+    MemorySize: 128          # config: RAM (CPU scales with it)
+    Architectures: [arm64]   # runtime environment: CPU architecture
+    Environment:
+      Variables:
+        TABLE_NAME: !Ref UsersTable   # config: env var passed to the code
+  AddUserFunction:
+    Properties:
+      Handler: app.lambda_handler     # config: entry point -> def lambda_handler(event, context)
+      CodeUri: src/add_user/          # the code to run
+      Policies: [ {DynamoDBWritePolicy: ...} ]   # config: IAM execution role
+```
+
+That `Handler: app.lambda_handler` is exactly why the code defines
+`def lambda_handler(event, context):`. The console flow does steps 2–3 separately (zip upload,
+then a config form); SAM unifies them — the template *is* the config, and `sam deploy` ships
+code + config together.
+
+## Concept — Is the handler boilerplate?
+
+Both: the **signature is a fixed contract (boilerplate); the name and body are not.**
+
+- **Fixed (contract):** Lambda's Python runtime always calls the handler with two positional
+  args — `def lambda_handler(event, context):`. `event` = the input, `context` = runtime info
+  (request id, time remaining, ...). This shape never changes in Python.
+- **Configurable (name):** `lambda_handler` is just convention. The name can be anything as long
+  as the `Handler: <file>.<function>` config points at it (e.g. `app.handle_request`).
+- **Varies case to case (body):** the logic, and specifically **how you read `event`** and
+  **what you return**, depend on the *trigger*:
+
+| Trigger | Read event as | Must return |
+| --- | --- | --- |
+| Direct invoke | the raw payload you sent | any JSON value (or nothing) |
+| API Gateway proxy | `event["pathParameters"]`, `["body"]`, `["headers"]` | `{statusCode, headers, body-as-string}` |
+| S3 | `event["Records"][0]["s3"]...` | (usually ignored) |
+| SQS | `event["Records"]` (message batch) | (usually ignored) |
+| EventBridge | `event["detail"]` | (usually ignored) |
+
+**Our two handlers prove it** — identical signature, different bodies driven by their triggers:
+
+```python
+# add_user — direct invoke: event IS the payload; returns a plain dict
+def lambda_handler(event, context):
+    table.put_item(Item=event or {})
+    return {"ok": True, ...}
+
+# get_user — API Gateway proxy: reads pathParameters; returns the proxy shape
+def lambda_handler(event, context):
+    userid = (event.get("pathParameters") or {}).get("userid")
+    return {"statusCode": 200, "headers": {...}, "body": json.dumps(item)}
+```
+
+(The `(event, context)` contract is Python/Node-style; other runtimes have their own handler
+interfaces, but within a runtime the signature is fixed.)
+
 ## Files
 
 ```

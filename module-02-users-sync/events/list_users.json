@@ -1,0 +1,6 @@
+{
+  "resource": "/users",
+  "httpMethod": "GET",
+  "pathParameters": null,
+  "body": null
+}

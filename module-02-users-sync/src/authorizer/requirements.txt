@@ -1,0 +1,3 @@
+# python-jose for JWT verification. Plain (no [cryptography]) uses the
+# pure-Python rsa/ecdsa backend, so `sam build` needs no container.
+python-jose==3.3.0

@@ -1,0 +1,240 @@
+# ============================================================================
+# AWS SAM template — Module 2: Synchronous Invocation ("Users Service")
+# ============================================================================
+# Aligned with the workshop's "v4 - Amazon Cognito" template.
+#
+# This version:
+#   * MONO-LAMBDA backend (one function, all routes incl. DELETE)
+#   * EXPLICIT REST API resource (AWS::Serverless::Api) instead of implicit
+#   * Full Amazon Cognito: user pool (name+email schema), app client, hosted-UI
+#     domain, and an admin user GROUP (used later by the Lambda authorizer)
+#   * A template PARAMETER for the admin group name
+#   * X-Ray tracing enabled (observability)
+#
+# NOTE ON AUTH: requests are authorized by a custom **Lambda authorizer**
+# (AuthorizerFunction) attached to RestAPI as the default authorizer. It
+# verifies the Cognito JWT and passes an `isAdmin` flag to the backend, which
+# enforces admin-only operations (DELETE). (Contrast: the native
+# COGNITO_USER_POOLS authorizer can only do a coarse "valid token?" check.)
+
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  M2 - Synchronous Invocation - Users Service (mono-lambda) with Amazon Cognito.
+
+# Globals: defaults applied to every function in the template.
+Globals:
+  Function:
+    Runtime: python3.12
+    MemorySize: 128
+    Timeout: 100            # generous; matches the workshop template
+    Tracing: Active         # enable AWS X-Ray tracing on every function
+    Architectures:
+      - arm64
+
+# Parameters are deploy-time inputs (you're prompted for them, or pass
+# --parameter-overrides). They let one template serve many configurations.
+Parameters:
+  UserPoolAdminGroupName:
+    Description: User pool group name for API administrators
+    Type: String
+    Default: apiAdmins
+
+Resources:
+  # --- DynamoDB table -------------------------------------------------------
+  UsersTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      # Name derived from the stack name so it's unique per stack but still
+      # predictable (e.g. "m2-users-service-Users").
+      TableName: !Sub ${AWS::StackName}-Users
+      AttributeDefinitions:
+        - AttributeName: userid
+          AttributeType: S
+      KeySchema:
+        - AttributeName: userid
+          KeyType: HASH
+      BillingMode: PAY_PER_REQUEST
+
+  # --- Mono-lambda: one function, all routes --------------------------------
+  UsersFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      # Handler path is relative to the template dir (CodeUri defaults to ".").
+      # So this loads module-02-users-sync/src/api/users.py -> lambda_handler.
+      Handler: src/api/users.lambda_handler
+      Description: Handler for all users-related operations (mono-lambda).
+      Environment:
+        Variables:
+          USERS_TABLE: !Ref UsersTable
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref UsersTable
+      Tags:
+        Stack: !Sub "${AWS::StackName}"
+      Events:
+        # All routes attach to the EXPLICIT RestAPI via RestApiId. Five routes,
+        # one handler (mono-lambda); the code dispatches on method + resource.
+        ListUsers:
+          Type: Api
+          Properties:
+            Path: /users
+            Method: get
+            RestApiId: !Ref RestAPI
+        CreateUser:
+          Type: Api
+          Properties:
+            Path: /users
+            Method: post
+            RestApiId: !Ref RestAPI
+        GetUser:
+          Type: Api
+          Properties:
+            Path: /users/{userid}
+            Method: get
+            RestApiId: !Ref RestAPI
+        UpdateUser:
+          Type: Api
+          Properties:
+            Path: /users/{userid}
+            Method: put
+            RestApiId: !Ref RestAPI
+        DeleteUser:
+          Type: Api
+          Properties:
+            Path: /users/{userid}
+            Method: delete
+            RestApiId: !Ref RestAPI
+
+  # --- Explicit REST API ----------------------------------------------------
+  # Declaring the API as its own resource (vs. the implicit one) gives us a
+  # handle to configure tracing and attach the Lambda authorizer below.
+  RestAPI:
+    Type: AWS::Serverless::Api
+    Properties:
+      StageName: Prod
+      TracingEnabled: true     # X-Ray tracing for the API stage
+      # Attach the custom Lambda authorizer as the DEFAULT for every route.
+      Auth:
+        DefaultAuthorizer: LambdaTokenAuthorizer
+        Authorizers:
+          LambdaTokenAuthorizer:
+            # FunctionPayloadType defaults to TOKEN; identity source defaults to
+            # the `Authorization` header. API Gateway passes that header value to
+            # the authorizer as event.authorizationToken.
+            FunctionArn: !GetAtt AuthorizerFunction.Arn
+      Tags:
+        Name: !Sub "${AWS::StackName}-API"
+        Stack: !Sub "${AWS::StackName}"
+
+  # --- Lambda authorizer ----------------------------------------------------
+  # Custom authorizer: verifies the Cognito JWT and surfaces admin-group
+  # membership. Has its own CodeUri (so its requirements.txt / python-jose is
+  # installed) and needs only basic execution + X-Ray (from Globals).
+  AuthorizerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub ${AWS::StackName}-authorizer
+      CodeUri: src/authorizer/
+      Handler: authorizer.lambda_handler
+      Description: Lambda authorizer — validates Cognito JWT, flags admin group.
+      Environment:
+        Variables:
+          USER_POOL_ID: !Ref UserPool
+          APP_CLIENT_ID: !Ref UserPoolClient
+          ADMIN_GROUP_NAME: !Ref UserPoolAdminGroupName
+
+  # --- Amazon Cognito: user pool (identity store) ---------------------------
+  UserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      UserPoolName: !Sub ${AWS::StackName}-UserPool
+      AdminCreateUserConfig:
+        AllowAdminCreateUserOnly: false   # allow self sign-up
+      AutoVerifiedAttributes:
+        - email
+      Schema:                              # required user attributes
+        - Name: name
+          AttributeDataType: String
+          Mutable: true
+          Required: true
+        - Name: email
+          AttributeDataType: String
+          Mutable: true
+          Required: true
+      UsernameAttributes:
+        - email                            # sign in with email as username
+      UserPoolTags:
+        Key: Name
+        Value: !Sub ${AWS::StackName} User Pool
+
+  # --- Cognito app client ---------------------------------------------------
+  UserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      ClientName: !Sub ${AWS::StackName}UserPoolClient
+      ExplicitAuthFlows:
+        - ALLOW_USER_PASSWORD_AUTH         # username+password (CLI testing)
+        - ALLOW_USER_SRP_AUTH              # secure remote password (real apps)
+        - ALLOW_REFRESH_TOKEN_AUTH
+      GenerateSecret: false                # public client (SPA/CLI/mobile)
+      PreventUserExistenceErrors: ENABLED  # don't leak which emails exist
+      RefreshTokenValidity: 30             # days
+      SupportedIdentityProviders:
+        - COGNITO
+      UserPoolId: !Ref UserPool
+      # OAuth / hosted-UI settings (enable the login page below)
+      AllowedOAuthFlowsUserPoolClient: true
+      AllowedOAuthFlows:
+        - code                             # authorization-code grant
+      AllowedOAuthScopes:
+        - email
+        - openid
+      CallbackURLs:
+        - http://localhost
+
+  # --- Cognito hosted-UI domain ---------------------------------------------
+  # Gives a hosted sign-up/sign-in web page at
+  # https://<domain>.auth.<region>.amazoncognito.com/login
+  UserPoolDomain:
+    Type: AWS::Cognito::UserPoolDomain
+    Properties:
+      Domain: !Ref UserPoolClient          # reuse the client id as the domain prefix
+      UserPoolId: !Ref UserPool
+
+  # --- Admin group ----------------------------------------------------------
+  # Membership shows up in a user's token as the `cognito:groups` claim. The
+  # Lambda authorizer (next step) reads it to grant admin-only access.
+  ApiAdministratorsUserPoolGroup:
+    Type: AWS::Cognito::UserPoolGroup
+    Properties:
+      Description: User group for API Administrators
+      GroupName: !Ref UserPoolAdminGroupName
+      Precedence: 0
+      UserPoolId: !Ref UserPool
+
+Outputs:
+  UsersTable:
+    Description: DynamoDB Users table
+    Value: !Ref UsersTable
+  UsersFunction:
+    Description: Lambda function used to perform actions on the users data
+    Value: !Ref UsersFunction
+  APIEndpoint:
+    Description: API Gateway endpoint URL
+    Value: !Sub "https://${RestAPI}.execute-api.${AWS::Region}.amazonaws.com/Prod"
+  UserPool:
+    Description: Cognito User Pool ID
+    Value: !Ref UserPool
+  UserPoolClient:
+    Description: Cognito User Pool Application Client ID
+    Value: !Ref UserPoolClient
+  UserPoolAdminGroupName:
+    Description: User Pool group name for API administrators
+    Value: !Ref UserPoolAdminGroupName
+  CognitoLoginURL:
+    Description: Cognito hosted login UI URL
+    Value: !Sub "https://${UserPoolClient}.auth.${AWS::Region}.amazoncognito.com/login?client_id=${UserPoolClient}&response_type=code&redirect_uri=http://localhost"
+  CognitoAuthCommand:
+    Description: AWS CLI command to authenticate and get an ID token
+    Value: !Sub "aws cognito-idp initiate-auth --auth-flow USER_PASSWORD_AUTH --client-id ${UserPoolClient} --auth-parameters USERNAME=<user@example.com>,PASSWORD=<password> --query 'AuthenticationResult.IdToken' --output text"
